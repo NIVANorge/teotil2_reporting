@@ -1,2 +1,3 @@
-# teotil2_reporting
- Generate annual reports for TEOTIL2
+# TEOTIL2 reporting
+
+Code to generate annual reports from TEOTIL2 data.
