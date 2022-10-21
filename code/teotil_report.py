@@ -167,11 +167,16 @@ def read_data_table(fpath, heading):
 
     df.reset_index(inplace=True, drop=True)
     df.sort_values("År", inplace=True)
+
+    # Rename col as requested by Rita Vigdis
+    if "Befolkning" in df.columns:
+        df.rename({"Befolkning": "Avløp"}, axis="columns", inplace=True)
+
     header = [
         "År",
         "Akvakultur",
         "Jordbruk",
-        "Befolkning",
+        "Avløp",
         "Industri",
         "Bakgrunn",
         "Totalt",
@@ -180,7 +185,188 @@ def read_data_table(fpath, heading):
     df = df[header]
     df = df.round(0).astype("Int64")
 
-    # Rename col as requested by Rita Vigdis
-    df.rename({"Befolkning": "Avløp"}, axis="columns", inplace=True)
+    return df
+
+
+def patch_legacy_data(df, legacy_data_fold, fname, heading, cutoff_year):
+    """The data in NIVA's database does not exactly match what is reported in old TEOTIL
+    reports. Differences are especially obvious in early years (pre-1995). It looks as
+    though the data used in previous reports comes from Access databases where John Rune
+    manually patched gaps in the data series from the database. In most cases the values
+    just seem to be averaged/filled from neighbouring years. I am not able to reproduce
+    these values using data in our database, but for consistency it is useful to be able
+    to use the old values for early years in new reports. This function takes the 'df'
+    generated from data in the database and patches it with the manually edited legacy
+    data used by John Rune. Legacy data is used for years less than or equal to the
+    'cutoff_year', and data from the database is used after.
+
+    Args
+        df:               Dataframe. Original, 'unmodified' data from NIVA's database
+        legacy_data_fold: Str. Folder containing legacy data files used by Jose and John
+                          Rune
+        fname:            Str. CSV to process
+        heading:          Str. Document heading to process
+        cutoff_year:      Int. Legacy data will be used for years less than or equal to
+                          this
+
+    Returns
+        Datafarme.
+    """
+    fpath = os.path.join(legacy_data_fold, fname)
+    legacy_df = read_data_table(fpath, heading)
+
+    legacy_df = legacy_df[legacy_df["År"] <= cutoff_year]
+    df = df[df["År"] > cutoff_year]
+    df = pd.concat([legacy_df, df], axis="rows")
+    df.sort_values("År", inplace=True)
 
     return df
+
+
+def get_teotil_results_main_catchments(st_yr, end_yr):
+    """ """
+    # List of catchments flowing to coast. 315 flows into Skagerrak
+    main_catches = [f"{i:03d}." for i in range(1, 248)] + ["315."]
+    df_list = []
+    for year in range(st_yr, end_yr + 1):
+        base_url = f"https://raw.githubusercontent.com/NIVANorge/teotil2/main/data/norway_annual_output_data/teotil2_results_{year}.csv"
+        df = pd.read_csv(base_url)
+        df = df.query("regine in @main_catches").copy()
+        df["År"] = year
+        cols = [i for i in df.columns if i.split("_")[0] == "accum"]
+        df = df[["regine", "År"] + cols]
+        df_list.append(df)
+    df = pd.concat(df_list)
+
+    return df
+
+
+def get_aggregation_dict_for_columns(par):
+    """Make a dict mapping TEOTIL column names to columns used in the report
+       with aggregation where necessary.
+
+    Args
+        par: Str. Either 'n' or 'p'
+
+    Returns
+        Dict with key's equal to headings used in the report and values are lists
+        of columns to aggregate in the TEOTIL output.
+    """
+    assert par in ("n", "p")
+
+    agg_dict = {
+        "Akvakultur": [f"accum_aqu_tot-{par}_tonnes"],
+        "Jordbruk": [
+            f"accum_agri_diff_tot-{par}_tonnes",
+            f"accum_agri_pt_tot-{par}_tonnes",
+        ],
+        "Avløp": [f"accum_ren_tot-{par}_tonnes", f"accum_spr_tot-{par}_tonnes"],
+        "Industri": [f"accum_ind_tot-{par}_tonnes"],
+        "Bakgrunn": [
+            f"accum_nat_diff_tot-{par}_tonnes",
+            f"accum_urban_tot-{par}_tonnes",
+        ],
+        "Totalt": [f"accum_all_sources_tot-{par}_tonnes"],
+        "Menneskeskapt": [
+            f"accum_anth_diff_tot-{par}_tonnes",
+            f"accum_all_point_tot-{par}_tonnes",
+        ],
+        # "Urban": [
+        #     f"accum_urban_tot-{par}_tonnes",
+        # ],
+    }
+
+    return agg_dict
+
+
+def aggregate_parameters(df, par):
+    """Aggregate columns in TEOTIL output to headings used in the report.
+
+    Args
+        df:  Dataframe of TEOTIL results
+        par: Str. Either 'n' or 'p'
+
+    Returns
+        Dataframe.
+    """
+    agg_dict = get_aggregation_dict_for_columns(par)
+    for group, cols in agg_dict.items():
+        df[group] = df[cols].sum(axis=1)
+
+    df = df[["regine", "År"] + list(agg_dict.keys())]
+
+    return df
+
+
+def aggregate_regions(df, par, out_fold=None):
+    """Sum TEOTIL output for the main catchments for each region defined in the
+       report.
+
+    Args
+        df:       Dataframe of results aggregated to the correct column anmes for
+                  the report
+        par:      Str. Either 'n' or 'p'
+        out_fold: Bool or str. Default None. Folder to save CSVs to, if desired
+
+    Returns
+        Dict of dataframes. Optionall, results for each region are saved to CSV.
+    """
+    assert par in ("n", "p")
+
+    # Map regions used in report to main catchments
+    # Intervals are "Python-style" i.e. include first but not last element in range
+    regions_dict = {
+        # Definerte kystavsnitt (chapter 5)
+        "Norges kystområder": [1, 248, 315],
+        "Sverige – Strømtangen fyr": [1, 3],
+        "Indre Oslofjord": [5, 10],
+        "Svenskegrensa – Lindesnes": [1, 24],
+        "Lindesnes – Stad": [24, 92],
+        "Stad – Russland": [92, 248],
+        # Norske vannregioner (chapter 6)
+        "Glomma": [1, 11],
+        "Vest-Viken": [11, 18],
+        "Agder": [18, 27],
+        "Rogaland": [27, 41],
+        "Hordaland": [41, 68],
+        "Sogn og Fjordane": [68, 92],
+        "Møre og Romsdal": [92, 117],
+        "Trøndelag": [117, 144],
+        "Nordland": [144, 186],
+        "Troms": [186, 211],
+        "Finnmark": [211, 248],
+        # Norske forvaltingsplanområder (chapter 7)
+        "Nordsjøen": [1, 91, 315],  # 315 is included here too in John Rune's Access db
+        "Norskehavet": [91, 171],
+        "Barentshavet": [171, 248],
+    }
+
+    result_dict = {}
+    for region, catches in regions_dict.items():
+        if len(catches) == 2:
+            catch_list = list(range(catches[0], catches[1]))
+        else:
+            catch_list = list(range(catches[0], catches[1])) + [catches[2]]
+        catch_list = [f"{i:03d}." for i in catch_list]
+
+        reg_df = df.query("regine in @catch_list").copy()
+        reg_df = reg_df.groupby("År").sum().reset_index()
+        reg_df = reg_df.round(0).astype(int)
+        result_dict[region] = reg_df
+
+        if out_fold:
+            csv_path = os.path.join(out_fold, f"{region}_{par}.csv")
+            reg_df.to_csv(csv_path, index=False)
+
+    return result_dict
+
+
+def filename_from_heading(heading):
+    """Build a file name based on chapter headings in the Word template."""
+    name, par = heading.split(":")
+    if par[1] == "f":
+        par = "p"
+    else:
+        par = "n"
+
+    return f"{name}_{par}.csv"
