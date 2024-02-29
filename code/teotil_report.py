@@ -5,7 +5,7 @@ import pandas as pd
 from docx import Document
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.oxml.xmlchemy import OxmlElement
+from docx.oxml.parser import OxmlElement
 from docx.shared import Cm, Pt
 from docx.text.paragraph import Paragraph
 
@@ -306,10 +306,10 @@ def aggregate_regions(df, par, out_fold=None):
         df:       Dataframe of results aggregated to the correct column anmes for
                   the report
         par:      Str. Either 'n' or 'p'
-        out_fold: Bool or str. Default None. Folder to save CSVs to, if desired
+        out_fold: None or str. Default None. Folder to save CSVs to, if desired
 
     Returns
-        Dict of dataframes. Optionall, results for each region are saved to CSV.
+        Dict of dataframes. Optionally, results for each region are saved to CSV.
     """
     assert par in ("n", "p")
 
@@ -350,11 +350,13 @@ def aggregate_regions(df, par, out_fold=None):
         catch_list = [f"{i:03d}." for i in catch_list]
 
         reg_df = df.query("regine in @catch_list").copy()
-        reg_df = reg_df.groupby("År").sum().reset_index()
+        reg_df = reg_df.groupby("År").sum(numeric_only=True).reset_index()
         reg_df = reg_df.round(0).astype(int)
         result_dict[region] = reg_df
 
         if out_fold:
+            if not os.path.exists(out_fold):
+                os.makedirs(out_fold)
             csv_path = os.path.join(out_fold, f"{region}_{par}.csv")
             reg_df.to_csv(csv_path, index=False)
 
